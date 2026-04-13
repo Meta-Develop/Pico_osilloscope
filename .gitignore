@@ -1,0 +1,61 @@
+# Build directories
+build/
+firmware/build/
+
+# Agent workspace (private, not for public repo)
+.agent/
+AGENTS.md
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+.env
+
+# C/C++ Build artifacts
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.d
+*.lst
+*.uf2
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp files
+*.log
+*.bak
+*.tmp
+temp_*
+_tmp_*
+debug_*
+
+# KiCad backups
+*-backups/
+*.kicad_prl
+fp-info-cache
+
+# Archives
+*.tar.gz
+*.zip
+
+# Generated docs
+docs/_build/
