@@ -123,6 +123,33 @@ python pc_app/src/main.py -p COM3 config --mode oscilloscope
 python pc_app/src/main.py -p COM3 config --trigger rising --channel 0 --level 2048
 ```
 
+## GUI (Real-Time Waveform Viewer)
+
+A PyQt6 + pyqtgraph oscilloscope-style GUI for real-time waveform visualization.
+
+```bash
+# Launch in hat mode (digital logic analyzer)
+python pc_app/src/gui.py --port COM3
+
+# Launch in oscilloscope mode (analog waveforms + digital)
+python pc_app/src/gui.py --port COM3 --mode oscilloscope
+```
+
+### GUI Features
+
+- **Analog Waveform Display**: 4-channel real-time voltage plots with per-channel color coding
+- **Digital Logic Analyzer**: Multi-channel digital waveform view for all GPIO pins
+- **Trigger Control**: Interactive trigger level line (draggable), edge mode selection
+- **Channel Toggles**: Enable/disable individual ADC channels
+- **Adjustable Buffer**: Configure display depth (256 – 16384 samples)
+- **Dark Theme**: Oscilloscope-style dark background with high-contrast traces
+- **Live Stats**: Sample count and FPS counter
+
+### Mode Switching
+
+- **Hat Mode**: Shows digital logic analyzer only (all 27 monitored GPIO pins)
+- **Oscilloscope Mode**: Split view with analog waveforms (top) and digital logic (bottom)
+
 ## CSV Format
 
 ### Hat Mode CSV
@@ -188,6 +215,7 @@ firmware/           Pico 2 firmware (C, Pico SDK)
 pc_app/             PC application (Python)
 ├── src/
 │   ├── main.py         CLI interface
+│   ├── gui.py          Real-time oscilloscope GUI
 │   └── serial_reader.py Protocol parser
 hardware/           Hat board design (KiCad)
 docs/               Additional documentation
