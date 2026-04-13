@@ -65,7 +65,6 @@ int osc_mode_run(void) {
 
     adc_sampler_start();
     pin_monitor_start();
-    usb_comm_send_status(STATUS_OK);
 
     while (true) {
         /* Check for commands */
@@ -163,7 +162,6 @@ int osc_mode_run(void) {
             }
         }
 
-        tud_task();
     }
 }
 

@@ -21,8 +21,6 @@ target_link_libraries(pico_oscilloscope
     hardware_gpio
     hardware_clocks
     hardware_irq
-    tinyusb_device
-    tinyusb_board
 )
 
 # Enable USB serial output (CDC)

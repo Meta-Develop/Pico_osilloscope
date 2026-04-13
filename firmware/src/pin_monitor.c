@@ -8,121 +8,129 @@
 #include "pin_monitor.h"
 #include "config.h"
 #include "hardware/pio.h"
+#include "hardware/pio_instructions.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"
 #include "pico/stdlib.h"
 
-/* PIO program: read all GPIO pins, push to FIFO
- *
- * .program pin_sample
- * loop:
- *     in pins, 32    ; Read all 32 GPIO bits
- *     push           ; Push to RX FIFO
- *     jmp loop
- */
-static const uint16_t pin_sample_program[] = {
-    0x4020,  /* in pins, 32 */
-    0x8020,  /* push block */
-    0x0000,  /* jmp 0 */
-};
+/* PIO program: read all GPIO pins and push to FIFO, looped via wrap. */
+static uint16_t pin_sample_program[] = { 0, 0 };
 
-static const struct pio_program pin_sample_program_struct = {
+static struct pio_program pin_sample_program_struct = {
     .instructions = pin_sample_program,
-    .length = 3,
+    .length = 2,
     .origin = -1,
 };
 
 static PIO pio = pio0;
 static uint sm = 0;
+static uint program_offset = 0;
 static int dma_chan = -1;
+static bool initialized = false;
 static uint32_t pin_mask_config;
 static bool running = false;
+static float clock_divider = 1.0f;
 
 /* Ping-pong DMA buffers */
 static uint32_t __attribute__((aligned(PIN_BUFFER_SIZE * 4)))
     buffer_a[PIN_BUFFER_SIZE];
 static uint32_t __attribute__((aligned(PIN_BUFFER_SIZE * 4)))
     buffer_b[PIN_BUFFER_SIZE];
+static uint32_t *dma_target_buffer = buffer_a;
 static volatile uint32_t *read_buffer = buffer_a;
 static volatile uint32_t read_count = 0;
 static volatile bool buffer_ready = false;
 
+static void pin_monitor_configure_inputs(uint32_t pin_mask) {
+    for (uint i = 0; i < GPIO_COUNT; i++) {
+        if (pin_mask & (1u << i)) {
+            pio_gpio_init(pio, i);
+            gpio_set_dir(i, GPIO_IN);
+            gpio_disable_pulls(i);
+        }
+    }
+}
+
+static void pin_monitor_configure_sm(void) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_restart(pio, sm);
+
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, program_offset, program_offset + 1);
+    sm_config_set_in_pins(&c, PIO_SAMPLE_PIN_BASE);
+    sm_config_set_in_shift(&c, false, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&c, clock_divider);
+
+    pio_sm_init(pio, sm, program_offset, &c);
+}
+
 /* DMA completion interrupt handler */
 static void dma_irq_handler(void) {
-    if (dma_hw->ints0 & (1u << dma_chan)) {
+    if (dma_chan >= 0 && (dma_hw->ints0 & (1u << dma_chan))) {
         dma_hw->ints0 = (1u << dma_chan);
 
-        /* Swap buffers */
-        if (dma_channel_hw_addr(dma_chan)->write_addr == (uintptr_t)buffer_b) {
-            read_buffer = buffer_a;
-            dma_channel_set_write_addr(dma_chan, buffer_b, true);
-        } else {
-            read_buffer = buffer_b;
-            dma_channel_set_write_addr(dma_chan, buffer_a, true);
-        }
+        read_buffer = dma_target_buffer;
         read_count = PIN_BUFFER_SIZE;
         buffer_ready = true;
+
+        dma_target_buffer = (dma_target_buffer == buffer_a) ? buffer_b : buffer_a;
+        dma_channel_transfer_to_buffer_now(dma_chan, dma_target_buffer, PIN_BUFFER_SIZE);
     }
 }
 
 void pin_monitor_init(uint32_t pin_mask) {
     pin_mask_config = pin_mask;
 
-    /* Configure GPIO pins as inputs */
-    for (uint i = 0; i < GPIO_COUNT; i++) {
-        if (pin_mask & (1u << i)) {
-            gpio_init(i);
-            gpio_set_dir(i, GPIO_IN);
-            gpio_pull_down(i);
-        }
+    pin_monitor_configure_inputs(pin_mask_config);
+
+    if (!initialized) {
+        pin_sample_program[0] = pio_encode_in(pio_pins, 32);
+        pin_sample_program[1] = pio_encode_push(false, true);
+        program_offset = pio_add_program(pio, &pin_sample_program_struct);
+
+        dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dc = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
+        channel_config_set_read_increment(&dc, false);
+        channel_config_set_write_increment(&dc, true);
+        channel_config_set_dreq(&dc, pio_get_dreq(pio, sm, false));
+
+        dma_channel_configure(
+            dma_chan,
+            &dc,
+            buffer_a,
+            &pio->rxf[sm],
+            PIN_BUFFER_SIZE,
+            false
+        );
+
+        dma_channel_set_irq0_enabled(dma_chan, true);
+        irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
+        irq_set_enabled(DMA_IRQ_0, true);
+        initialized = true;
     }
 
-    /* Load PIO program */
-    uint offset = pio_add_program(pio, &pin_sample_program_struct);
-
-    /* Configure state machine */
-    pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, offset, offset + 2);
-    sm_config_set_in_pins(&c, PIO_SAMPLE_PIN_BASE);
-    sm_config_set_in_shift(&c, false, true, 32); /* Shift left, auto-push */
-    sm_config_set_clkdiv(&c, 1.0f); /* Full speed */
-
-    pio_sm_init(pio, sm, offset, &c);
-
-    /* Configure DMA */
-    dma_chan = dma_claim_unused_channel(true);
-    dma_channel_config dc = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
-    channel_config_set_read_increment(&dc, false);
-    channel_config_set_write_increment(&dc, true);
-    channel_config_set_dreq(&dc, pio_get_dreq(pio, sm, false));
-
-    dma_channel_configure(
-        dma_chan,
-        &dc,
-        buffer_a,                     /* Write address */
-        &pio->rxf[sm],               /* Read address (PIO RX FIFO) */
-        PIN_BUFFER_SIZE,              /* Transfer count */
-        false                         /* Don't start yet */
-    );
-
-    /* Set up DMA interrupt */
-    dma_channel_set_irq0_enabled(dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
-    irq_set_enabled(DMA_IRQ_0, true);
+    pin_monitor_configure_sm();
 }
 
 void pin_monitor_start(void) {
-    if (running) return;
+    if (!initialized || running) return;
 
     buffer_ready = false;
     read_count = 0;
+    read_buffer = buffer_a;
+    dma_target_buffer = buffer_a;
 
-    /* Start DMA */
-    dma_channel_set_write_addr(dma_chan, buffer_a, true);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_restart(pio, sm);
+    dma_channel_abort(dma_chan);
 
-    /* Enable PIO state machine */
+    /* Start DMA before enabling the state machine. */
+    dma_channel_transfer_to_buffer_now(dma_chan, dma_target_buffer, PIN_BUFFER_SIZE);
+
     pio_sm_set_enabled(pio, sm, true);
     running = true;
 }
@@ -132,6 +140,7 @@ void pin_monitor_stop(void) {
 
     pio_sm_set_enabled(pio, sm, false);
     dma_channel_abort(dma_chan);
+    pio_sm_clear_fifos(pio, sm);
     running = false;
 }
 
@@ -163,5 +172,13 @@ bool pin_monitor_is_running(void) {
 }
 
 void pin_monitor_set_divider(float divider) {
-    pio_sm_set_clkdiv(pio, sm, divider);
+    if (divider < 1.0f) {
+        divider = 1.0f;
+    }
+
+    clock_divider = divider;
+
+    if (initialized) {
+        pio_sm_set_clkdiv(pio, sm, clock_divider);
+    }
 }

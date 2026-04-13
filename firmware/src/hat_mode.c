@@ -11,6 +11,7 @@
 #include "pin_monitor.h"
 #include "usb_comm.h"
 #include "pico/stdlib.h"
+#include <string.h>
 
 void hat_mode_init(void) {
     pin_monitor_init(HAT_DIGITAL_MASK);
@@ -23,7 +24,6 @@ int hat_mode_run(void) {
     uint16_t cmd_len;
 
     pin_monitor_start();
-    usb_comm_send_status(STATUS_OK);
 
     while (true) {
         /* Check for commands */
@@ -78,7 +78,6 @@ int hat_mode_run(void) {
             }
         }
 
-        tud_task(); /* TinyUSB device task */
     }
 }
 

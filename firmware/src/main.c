@@ -10,10 +10,11 @@
 #include "hat_mode.h"
 #include "osc_mode.h"
 #include "pico/stdlib.h"
+#include "pico/stdio_usb.h"
 #include "hardware/gpio.h"
-#include "tusb.h"
 
 static uint8_t current_mode = MODE_HAT;
+static bool sampling_requested = false;
 
 static void led_init(void) {
     gpio_init(GPIO_LED);
@@ -28,8 +29,7 @@ static void led_set(bool on) {
 static void wait_for_usb(void) {
     /* Blink LED while waiting for USB connection */
     bool led_state = false;
-    while (!tud_cdc_connected()) {
-        tud_task();
+    while (!stdio_usb_connected()) {
         led_state = !led_state;
         led_set(led_state);
         sleep_ms(LED_BLINK_MS);
@@ -42,22 +42,29 @@ static void handle_idle_commands(void) {
     uint8_t cmd_type;
     uint16_t cmd_len;
 
-    /* Process commands while not in a mode */
     while (usb_comm_receive_command(&cmd_type, cmd_buf, &cmd_len, sizeof(cmd_buf))) {
         switch (cmd_type) {
         case CMD_MODE:
-            if (cmd_len >= 1) {
+            if (cmd_len >= 1 && cmd_buf[0] <= MODE_OSCILLOSCOPE) {
                 current_mode = cmd_buf[0];
                 usb_comm_send_status(STATUS_OK);
+            } else {
+                usb_comm_send_error(STATUS_ERROR, "Invalid mode");
             }
             break;
 
         case CMD_START:
+            sampling_requested = true;
             usb_comm_send_status(STATUS_OK);
-            return; /* Exit idle loop to start mode */
+            return;
+
+        case CMD_STOP:
+            sampling_requested = false;
+            usb_comm_send_status(STATUS_OK);
+            break;
 
         default:
-            usb_comm_send_status(STATUS_OK);
+            usb_comm_send_error(STATUS_ERROR, "Unsupported idle command");
             break;
         }
     }
@@ -73,6 +80,13 @@ int main(void) {
 
     while (true) {
         int next_mode;
+
+        if (!sampling_requested) {
+            led_set(true);
+            handle_idle_commands();
+            sleep_ms(USB_POLL_MS);
+            continue;
+        }
 
         switch (current_mode) {
         case MODE_HAT:
@@ -92,21 +106,10 @@ int main(void) {
             continue;
         }
 
-        /* Handle mode switch or stop */
+        sampling_requested = false;
+
         if (next_mode >= 0) {
             current_mode = (uint8_t)next_mode;
-        } else {
-            /* Stopped: wait for new command */
-            led_set(true);
-            while (true) {
-                tud_task();
-                handle_idle_commands();
-                if (usb_comm_connected()) {
-                    /* Check if start command was processed */
-                    break;
-                }
-                sleep_ms(USB_POLL_MS);
-            }
         }
     }
 

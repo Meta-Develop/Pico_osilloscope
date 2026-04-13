@@ -24,10 +24,16 @@
 #define GPIO_NOT_EXPOSED_0 23
 #define GPIO_NOT_EXPOSED_1 24
 
-/* Hat mode: all GPIOs as digital (GPIO0-22, 25-29), minus LED */
+/* Hat mode: all exposed GPIOs as digital except the onboard LED */
 /* Oscilloscope mode digital: GPIO0-22 */
-#define HAT_DIGITAL_MASK  0x3FE7FFFF  /* GPIO0-22, GPIO25-29 (bit mask) */
+#define HAT_DIGITAL_MASK  0x3C7FFFFF  /* GPIO0-22, GPIO26-29 (bit mask) */
 #define OSC_DIGITAL_MASK  0x007FFFFF  /* GPIO0-22 (bit mask) */
+
+/* ---------- Clock Configuration ---------- */
+#define SYSTEM_CLOCK_HZ   150000000u
+#define ADC_CLOCK_HZ      48000000u
+#define ADC_CONVERSION_CLOCKS 96u
+#define PIO_SAMPLE_LOOP_CYCLES 2u
 
 /* ---------- ADC Configuration ---------- */
 #define ADC_CHANNELS      4   /* ADC0-ADC3 (GPIO26-29) */

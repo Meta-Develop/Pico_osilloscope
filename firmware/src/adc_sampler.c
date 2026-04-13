@@ -14,33 +14,42 @@
 #include <string.h>
 
 static int dma_chan = -1;
+static bool initialized = false;
 static uint8_t active_channels = 0;
 static uint8_t channel_mask_config = 0;
 static bool running = false;
+static float clock_divider = 0.0f;
 
 /* Ping-pong buffers */
 static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
     adc_buf_a[ADC_BUFFER_SIZE];
 static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
     adc_buf_b[ADC_BUFFER_SIZE];
+static uint16_t *dma_target_buffer = adc_buf_a;
 static volatile uint16_t *read_buf = adc_buf_a;
 static volatile uint32_t samples_ready = 0;
 static volatile bool buf_ready = false;
 
+static uint8_t first_active_channel(void) {
+    for (uint8_t ch = 0; ch < ADC_CHANNELS; ch++) {
+        if (channel_mask_config & (1u << ch)) {
+            return ch;
+        }
+    }
+
+    return 0;
+}
+
 static void adc_dma_irq_handler(void) {
-    if (dma_hw->ints1 & (1u << dma_chan)) {
+    if (dma_chan >= 0 && (dma_hw->ints1 & (1u << dma_chan))) {
         dma_hw->ints1 = (1u << dma_chan);
 
-        /* Swap buffers */
-        if (dma_channel_hw_addr(dma_chan)->write_addr == (uintptr_t)adc_buf_b) {
-            read_buf = adc_buf_a;
-            dma_channel_set_write_addr(dma_chan, adc_buf_b, true);
-        } else {
-            read_buf = adc_buf_b;
-            dma_channel_set_write_addr(dma_chan, adc_buf_a, true);
-        }
+        read_buf = dma_target_buffer;
         samples_ready = ADC_BUFFER_SIZE;
         buf_ready = true;
+
+        dma_target_buffer = (dma_target_buffer == adc_buf_a) ? adc_buf_b : adc_buf_a;
+        dma_channel_transfer_to_buffer_now(dma_chan, dma_target_buffer, ADC_BUFFER_SIZE);
     }
 }
 
@@ -62,17 +71,12 @@ void adc_sampler_init(uint8_t channel_mask) {
         return;
     }
 
+    adc_select_input(first_active_channel());
+
     /* Configure round-robin if multiple channels */
     if (active_channels > 1) {
         adc_set_round_robin(channel_mask_config);
     } else {
-        /* Single channel: find which one */
-        for (uint8_t ch = 0; ch < ADC_CHANNELS; ch++) {
-            if (channel_mask_config & (1u << ch)) {
-                adc_select_input(ch);
-                break;
-            }
-        }
         adc_set_round_robin(0);
     }
 
@@ -85,42 +89,45 @@ void adc_sampler_init(uint8_t channel_mask) {
         false   /* No byte shift (keep 12-bit) */
     );
 
-    /* Fastest sampling: divider = 0 */
-    adc_set_clkdiv(0);
+    adc_set_clkdiv(clock_divider);
 
-    /* Configure DMA */
-    dma_chan = dma_claim_unused_channel(true);
-    dma_channel_config dc = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&dc, DMA_SIZE_16);
-    channel_config_set_read_increment(&dc, false);
-    channel_config_set_write_increment(&dc, true);
-    channel_config_set_dreq(&dc, DREQ_ADC);
+    if (!initialized) {
+        dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dc = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dc, DMA_SIZE_16);
+        channel_config_set_read_increment(&dc, false);
+        channel_config_set_write_increment(&dc, true);
+        channel_config_set_dreq(&dc, DREQ_ADC);
 
-    dma_channel_configure(
-        dma_chan,
-        &dc,
-        adc_buf_a,        /* Write address */
-        &adc_hw->fifo,    /* Read address */
-        ADC_BUFFER_SIZE,   /* Transfer count */
-        false              /* Don't start yet */
-    );
+        dma_channel_configure(
+            dma_chan,
+            &dc,
+            adc_buf_a,
+            &adc_hw->fifo,
+            ADC_BUFFER_SIZE,
+            false
+        );
 
-    /* DMA interrupt on IRQ1 (IRQ0 used by pin_monitor) */
-    dma_channel_set_irq1_enabled(dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_1, adc_dma_irq_handler);
-    irq_set_enabled(DMA_IRQ_1, true);
+        dma_channel_set_irq1_enabled(dma_chan, true);
+        irq_set_exclusive_handler(DMA_IRQ_1, adc_dma_irq_handler);
+        irq_set_enabled(DMA_IRQ_1, true);
+        initialized = true;
+    }
 }
 
 void adc_sampler_start(void) {
-    if (running || active_channels == 0) return;
+    if (!initialized || running || active_channels == 0) return;
 
     buf_ready = false;
     samples_ready = 0;
+    read_buf = adc_buf_a;
+    dma_target_buffer = adc_buf_a;
 
-    /* Start DMA */
-    dma_channel_set_write_addr(dma_chan, adc_buf_a, true);
+    adc_fifo_drain();
+    dma_channel_abort(dma_chan);
 
-    /* Start ADC free-running */
+    dma_channel_transfer_to_buffer_now(dma_chan, dma_target_buffer, ADC_BUFFER_SIZE);
+
     adc_run(true);
     running = true;
 }
@@ -152,7 +159,8 @@ uint32_t adc_sampler_read(uint16_t *buffer, uint32_t count) {
 }
 
 void adc_sampler_set_divider(uint16_t divider) {
-    adc_set_clkdiv((float)divider);
+    clock_divider = (float)divider;
+    adc_set_clkdiv(clock_divider);
 }
 
 uint8_t adc_sampler_channel_count(void) {
