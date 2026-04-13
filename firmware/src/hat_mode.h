@@ -1,22 +1,35 @@
-#ifndef PICO_OSC_HAT_MODE_H
-#define PICO_OSC_HAT_MODE_H
+/**
+ * hat_mode.h — Hat Mode: All-Digital GPIO Monitoring
+ *
+ * Monitors all TargetPico GPIO pins as digital logic.
+ * Uses PIO for high-speed parallel sampling.
+ */
+
+#ifndef HAT_MODE_H
+#define HAT_MODE_H
 
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Initialize hat mode (GPIO monitor + ADC) */
+/**
+ * Initialize hat mode.
+ * Configures all GPIO pins as digital inputs and sets up PIO sampling.
+ */
 void hat_mode_init(void);
 
-/* Start hat mode sampling */
-void hat_mode_start(void);
+/**
+ * Run hat mode main loop (blocking).
+ * Continuously samples GPIO states and streams data over USB.
+ * Returns when a CMD_STOP or CMD_MODE command is received.
+ *
+ * @return New mode to switch to (MODE_HAT or MODE_OSCILLOSCOPE),
+ *         or -1 if stopped without mode change.
+ */
+int hat_mode_run(void);
 
-/* Stop hat mode sampling */
+/**
+ * Stop hat mode and release resources.
+ */
 void hat_mode_stop(void);
 
-/* Main loop tick for hat mode: sample and send data over USB */
-void hat_mode_tick(void);
-
-/* Check if hat mode is currently active */
-bool hat_mode_is_active(void);
-
-#endif /* PICO_OSC_HAT_MODE_H */
+#endif /* HAT_MODE_H */

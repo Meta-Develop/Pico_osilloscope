@@ -1,178 +1,183 @@
+/**
+ * usb_comm.c — USB CDC Serial Communication
+ *
+ * Binary protocol implementation for Pico <-> PC data exchange.
+ */
+
 #include "usb_comm.h"
 #include "config.h"
-
-#include <stdio.h>
-#include <string.h>
 #include "pico/stdlib.h"
 #include "tusb.h"
+#include <string.h>
+#include <stdio.h>
 
-/* --- CRC-8 MAXIM --- */
-uint8_t crc8_maxim(const uint8_t *data, uint32_t len) {
-    uint8_t crc = 0x00;
-    for (uint32_t i = 0; i < len; i++) {
+/* Receive state machine */
+typedef enum {
+    RX_WAIT_SYNC,
+    RX_WAIT_TYPE,
+    RX_WAIT_LEN_LO,
+    RX_WAIT_LEN_HI,
+    RX_WAIT_PAYLOAD,
+    RX_WAIT_CRC
+} rx_state_t;
+
+static rx_state_t rx_state = RX_WAIT_SYNC;
+static uint8_t rx_type;
+static uint16_t rx_length;
+static uint16_t rx_received;
+static uint8_t rx_buf[PROTO_MAX_PAYLOAD];
+
+void usb_comm_init(void) {
+    stdio_init_all();
+}
+
+uint8_t crc8_maxim(const uint8_t *data, uint16_t length) {
+    uint8_t crc = CRC8_INIT;
+    for (uint16_t i = 0; i < length; i++) {
         crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 0x01) {
-                crc = (crc >> 1) ^ 0x8C;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            if (crc & 0x80) {
+                crc = (crc << 1) ^ CRC8_POLY;
             } else {
-                crc >>= 1;
+                crc <<= 1;
             }
         }
     }
     return crc;
 }
 
-/* --- TX --- */
-
-static uint8_t tx_frame[5 + PROTO_MAX_PAYLOAD]; /* SYNC + TYPE + LEN(2) + PAYLOAD + CRC */
-
-void usb_comm_init(void) {
-    stdio_init_all();
+bool usb_comm_connected(void) {
+    return tud_cdc_connected();
 }
 
-bool usb_comm_send(uint8_t msg_type, const uint8_t *payload, uint16_t len) {
-    if (len > PROTO_MAX_PAYLOAD) return false;
-    if (!tud_cdc_connected()) return false;
-
-    uint32_t frame_len = 0;
-    tx_frame[frame_len++] = PROTO_SYNC_BYTE;
-    tx_frame[frame_len++] = msg_type;
-    tx_frame[frame_len++] = (uint8_t)(len & 0xFF);        /* length low byte */
-    tx_frame[frame_len++] = (uint8_t)((len >> 8) & 0xFF); /* length high byte */
-
-    if (len > 0 && payload != NULL) {
-        memcpy(&tx_frame[frame_len], payload, len);
-        frame_len += len;
+bool usb_comm_send_frame(uint8_t type, const uint8_t *payload, uint16_t length) {
+    if (!tud_cdc_connected()) {
+        return false;
     }
 
-    /* CRC over type + length + payload */
-    uint8_t crc = crc8_maxim(&tx_frame[1], frame_len - 1);
-    tx_frame[frame_len++] = crc;
+    uint8_t header[PROTO_HEADER_SIZE];
+    header[0] = PROTO_SYNC;
+    header[1] = type;
+    header[2] = (uint8_t)(length & 0xFF);
+    header[3] = (uint8_t)((length >> 8) & 0xFF);
 
-    /* Write to USB CDC */
+    /* Compute CRC over type + length + payload */
+    uint8_t crc_data[PROTO_HEADER_SIZE - 1 + length];
+    memcpy(crc_data, &header[1], PROTO_HEADER_SIZE - 1);
+    if (length > 0 && payload != NULL) {
+        memcpy(crc_data + PROTO_HEADER_SIZE - 1, payload, length);
+    }
+    uint8_t crc = crc8_maxim(crc_data, PROTO_HEADER_SIZE - 1 + length);
+
+    /* Send header */
     uint32_t written = 0;
-    while (written < frame_len) {
-        uint32_t avail = tud_cdc_write_available();
-        if (avail == 0) {
-            tud_cdc_write_flush();
-            continue;
-        }
-        uint32_t chunk = frame_len - written;
-        if (chunk > avail) chunk = avail;
-        tud_cdc_write(&tx_frame[written], chunk);
-        written += chunk;
+    written += tud_cdc_write(header, PROTO_HEADER_SIZE);
+
+    /* Send payload */
+    if (length > 0 && payload != NULL) {
+        written += tud_cdc_write(payload, length);
     }
+
+    /* Send CRC */
+    written += tud_cdc_write(&crc, PROTO_CRC_SIZE);
+
     tud_cdc_write_flush();
-    return true;
+
+    return (written == (uint32_t)(PROTO_HEADER_SIZE + length + PROTO_CRC_SIZE));
 }
 
-/* --- RX --- */
+void usb_comm_send_status(uint8_t status_code) {
+    usb_comm_send_frame(MSG_STATUS, &status_code, 1);
+}
 
-typedef enum {
-    RX_WAIT_SYNC,
-    RX_READ_TYPE,
-    RX_READ_LEN_LOW,
-    RX_READ_LEN_HIGH,
-    RX_READ_PAYLOAD,
-    RX_READ_CRC
-} rx_state_t;
+void usb_comm_send_error(uint8_t error_code, const char *message) {
+    uint16_t msg_len = (uint16_t)strlen(message);
+    uint16_t total = 1 + msg_len;
+    uint8_t buf[PROTO_MAX_PAYLOAD];
 
-static rx_state_t rx_state = RX_WAIT_SYNC;
-static uint8_t rx_buf[USB_RX_BUF_SIZE];
-static uint8_t rx_type = 0;
-static uint16_t rx_expected_len = 0;
-static uint16_t rx_payload_idx = 0;
-static uint8_t rx_crc_byte = 0;
+    if (total > PROTO_MAX_PAYLOAD) {
+        total = PROTO_MAX_PAYLOAD;
+        msg_len = total - 1;
+    }
 
-static uint8_t cmd_buf[USB_RX_BUF_SIZE];
-static uint16_t cmd_len = 0;
-static uint8_t cmd_type = 0;
-static volatile bool cmd_ready = false;
+    buf[0] = error_code;
+    memcpy(&buf[1], message, msg_len);
 
-static void rx_process_byte(uint8_t byte) {
-    switch (rx_state) {
-    case RX_WAIT_SYNC:
-        if (byte == PROTO_SYNC_BYTE) rx_state = RX_READ_TYPE;
-        break;
-    case RX_READ_TYPE:
-        rx_type = byte;
-        rx_state = RX_READ_LEN_LOW;
-        break;
-    case RX_READ_LEN_LOW:
-        rx_expected_len = byte;
-        rx_state = RX_READ_LEN_HIGH;
-        break;
-    case RX_READ_LEN_HIGH:
-        rx_expected_len |= ((uint16_t)byte << 8);
-        rx_payload_idx = 0;
-        if (rx_expected_len == 0) {
-            rx_state = RX_READ_CRC;
-        } else if (rx_expected_len > USB_RX_BUF_SIZE) {
-            rx_state = RX_WAIT_SYNC; /* frame too large, discard */
-        } else {
-            rx_state = RX_READ_PAYLOAD;
+    usb_comm_send_frame(MSG_ERROR, buf, total);
+}
+
+bool usb_comm_receive_command(uint8_t *type, uint8_t *payload,
+                              uint16_t *length, uint16_t max_len) {
+    while (tud_cdc_available()) {
+        uint8_t byte;
+        if (tud_cdc_read(&byte, 1) != 1) {
+            break;
         }
-        break;
-    case RX_READ_PAYLOAD:
-        rx_buf[rx_payload_idx++] = byte;
-        if (rx_payload_idx >= rx_expected_len) {
-            rx_state = RX_READ_CRC;
-        }
-        break;
-    case RX_READ_CRC:
-        rx_crc_byte = byte;
-        /* Verify CRC: compute over type + len(2) + payload */
-        {
-            uint8_t verify_buf[3 + USB_RX_BUF_SIZE];
-            verify_buf[0] = rx_type;
-            verify_buf[1] = (uint8_t)(rx_expected_len & 0xFF);
-            verify_buf[2] = (uint8_t)((rx_expected_len >> 8) & 0xFF);
-            if (rx_expected_len > 0) {
-                memcpy(&verify_buf[3], rx_buf, rx_expected_len);
+
+        switch (rx_state) {
+        case RX_WAIT_SYNC:
+            if (byte == PROTO_SYNC) {
+                rx_state = RX_WAIT_TYPE;
             }
-            uint8_t expected_crc = crc8_maxim(verify_buf, 3 + rx_expected_len);
-            if (rx_crc_byte == expected_crc && !cmd_ready) {
-                cmd_type = rx_type;
-                cmd_len = rx_expected_len;
-                if (cmd_len > 0) {
-                    memcpy(cmd_buf, rx_buf, cmd_len);
+            break;
+
+        case RX_WAIT_TYPE:
+            rx_type = byte;
+            rx_state = RX_WAIT_LEN_LO;
+            break;
+
+        case RX_WAIT_LEN_LO:
+            rx_length = byte;
+            rx_state = RX_WAIT_LEN_HI;
+            break;
+
+        case RX_WAIT_LEN_HI:
+            rx_length |= ((uint16_t)byte << 8);
+            if (rx_length > PROTO_MAX_PAYLOAD || rx_length > max_len) {
+                rx_state = RX_WAIT_SYNC; /* Frame too large, discard */
+                break;
+            }
+            if (rx_length == 0) {
+                rx_state = RX_WAIT_CRC;
+            } else {
+                rx_received = 0;
+                rx_state = RX_WAIT_PAYLOAD;
+            }
+            break;
+
+        case RX_WAIT_PAYLOAD:
+            rx_buf[rx_received++] = byte;
+            if (rx_received >= rx_length) {
+                rx_state = RX_WAIT_CRC;
+            }
+            break;
+
+        case RX_WAIT_CRC: {
+            /* Verify CRC */
+            uint8_t crc_data[3 + rx_length];
+            crc_data[0] = rx_type;
+            crc_data[1] = (uint8_t)(rx_length & 0xFF);
+            crc_data[2] = (uint8_t)((rx_length >> 8) & 0xFF);
+            if (rx_length > 0) {
+                memcpy(&crc_data[3], rx_buf, rx_length);
+            }
+            uint8_t expected_crc = crc8_maxim(crc_data, 3 + rx_length);
+
+            rx_state = RX_WAIT_SYNC;
+
+            if (byte == expected_crc) {
+                *type = rx_type;
+                *length = rx_length;
+                if (rx_length > 0) {
+                    memcpy(payload, rx_buf, rx_length);
                 }
-                cmd_ready = true;
+                return true;
             }
+            /* CRC mismatch, frame discarded */
+            break;
         }
-        rx_state = RX_WAIT_SYNC;
-        break;
-    }
-}
-
-void usb_comm_poll(void) {
-    tud_task();
-    if (!tud_cdc_available()) return;
-
-    uint8_t buf[64];
-    uint32_t count = tud_cdc_read(buf, sizeof(buf));
-    for (uint32_t i = 0; i < count; i++) {
-        rx_process_byte(buf[i]);
-    }
-}
-
-bool usb_comm_cmd_available(void) {
-    return cmd_ready;
-}
-
-uint8_t usb_comm_read_cmd(uint8_t *buf, uint16_t *out_len, uint16_t buf_size) {
-    if (!cmd_ready) {
-        *out_len = 0;
-        return 0;
+        }
     }
 
-    uint8_t type = cmd_type;
-    uint16_t len = cmd_len;
-    if (len > buf_size) len = buf_size;
-    if (len > 0) {
-        memcpy(buf, cmd_buf, len);
-    }
-    *out_len = len;
-    cmd_ready = false;
-    return type;
+    return false;
 }

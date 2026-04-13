@@ -1,55 +1,98 @@
-#ifndef PICO_OSC_CONFIG_H
-#define PICO_OSC_CONFIG_H
+/**
+ * config.h — Pico Oscilloscope Configuration
+ *
+ * Pin mapping, protocol constants, and hardware configuration
+ * for both Hat Mode and Oscilloscope Mode.
+ */
 
-/* --- Version --- */
-#define FIRMWARE_VERSION_MAJOR  0
-#define FIRMWARE_VERSION_MINOR  1
-#define FIRMWARE_VERSION_PATCH  0
+#ifndef CONFIG_H
+#define CONFIG_H
 
-/* --- Operating Modes --- */
-#define MODE_HAT            0
-#define MODE_OSCILLOSCOPE   1
-#define DEFAULT_MODE        MODE_HAT
+#include <stdint.h>
 
-/* --- ADC Configuration --- */
-#define ADC_NUM_CHANNELS    3       /* ADC0-ADC2 (GPIO26-28) */
-#define ADC_SAMPLE_RATE_HZ  100000  /* 100 ksps default */
-#define ADC_RESOLUTION_BITS 12
-#define ADC_MAX_VALUE       4095
-#define ADC_VREF            3.3f
+/* ---------- Operating Modes ---------- */
+#define MODE_HAT          0   /* All GPIO as digital logic */
+#define MODE_OSCILLOSCOPE 1   /* 4ch ADC + remaining digital */
 
-/* --- GPIO Monitoring (Hat Mode) --- */
-#define PIN_MONITOR_FIRST_GPIO  0
-#define PIN_MONITOR_LAST_GPIO   22
-#define PIN_MONITOR_COUNT       23  /* GPIO0-GPIO22 */
-#define PIN_MONITOR_SAMPLE_HZ   10000  /* 10 kHz default */
+/* ---------- GPIO Configuration ---------- */
+#define GPIO_COUNT        30  /* GPIO0-GPIO29 */
+#define GPIO_LED          25  /* Onboard LED */
+#define GPIO_ADC_START    26  /* First ADC-capable GPIO */
+#define GPIO_ADC_END      29  /* Last ADC-capable GPIO */
 
-/* --- Status LED --- */
-#define LED_PIN             25
+/* GPIO23 and GPIO24 are not exposed on Pico 2 */
+#define GPIO_NOT_EXPOSED_0 23
+#define GPIO_NOT_EXPOSED_1 24
 
-/* --- Communication Protocol --- */
-#define PROTO_SYNC_BYTE     0xAA
-#define PROTO_MAX_PAYLOAD   4096
+/* Hat mode: all GPIOs as digital (GPIO0-22, 25-29), minus LED */
+/* Oscilloscope mode digital: GPIO0-22 */
+#define HAT_DIGITAL_MASK  0x3FE7FFFF  /* GPIO0-22, GPIO25-29 (bit mask) */
+#define OSC_DIGITAL_MASK  0x007FFFFF  /* GPIO0-22 (bit mask) */
+
+/* ---------- ADC Configuration ---------- */
+#define ADC_CHANNELS      4   /* ADC0-ADC3 (GPIO26-29) */
+#define ADC_RESOLUTION    12  /* 12-bit */
+#define ADC_MAX_VALUE     4095
+#define ADC_VREF          3.3f
+#define ADC_MAX_SAMPLE_RATE 500000  /* 500 ksps shared */
+
+/* Default sample rate per channel (4ch round-robin) */
+#define ADC_DEFAULT_RATE  (ADC_MAX_SAMPLE_RATE / ADC_CHANNELS)
+
+/* ---------- Sampling Buffers ---------- */
+#define ADC_BUFFER_SIZE   4096   /* Samples per ADC buffer (DMA) */
+#define PIN_BUFFER_SIZE   4096   /* GPIO snapshots per buffer */
+#define USB_TX_BUFFER_SIZE 8192  /* USB transmit buffer bytes */
+
+/* DMA ping-pong: 2 buffers per channel */
+#define ADC_BUFFER_COUNT  2
+
+/* ---------- PIO Configuration ---------- */
+/* PIO0: primary digital sampling */
+/* PIO1: secondary / oscilloscope digital */
+#define PIO_SAMPLE_PIN_BASE  0   /* Start sampling from GPIO0 */
+#define PIO_SAMPLE_PIN_COUNT 30  /* Sample GPIO0-29 */
+
+/* ---------- Communication Protocol ---------- */
+#define PROTO_SYNC        0xAA
 
 /* Message types: Pico -> PC */
-#define MSG_PIN_DATA        0x01
-#define MSG_ADC_DATA        0x02
-#define MSG_WAVE_DATA       0x03
-#define MSG_STATUS          0x20
-#define MSG_ERROR           0xFF
+#define MSG_PIN_DATA      0x01  /* GPIO pin state snapshots */
+#define MSG_ADC_DATA      0x02  /* ADC sample data */
+#define MSG_TRIGGER       0x03  /* Trigger event */
+#define MSG_STATUS        0x20  /* Status response */
+#define MSG_ERROR         0xFF  /* Error */
 
-/* Message types: PC -> Pico */
-#define CMD_CONFIG          0x10
-#define CMD_START           0x11
-#define CMD_STOP            0x12
-#define CMD_MODE            0x13
+/* Command types: PC -> Pico */
+#define CMD_CONFIG        0x10  /* Configuration */
+#define CMD_START         0x11  /* Start sampling */
+#define CMD_STOP          0x12  /* Stop sampling */
+#define CMD_MODE          0x13  /* Switch mode */
+#define CMD_TRIGGER       0x14  /* Configure trigger */
 
-/* --- DMA --- */
-#define ADC_DMA_CHANNEL     0
-#define ADC_DMA_BUF_SIZE    1024  /* samples per buffer */
+/* Protocol limits */
+#define PROTO_MAX_PAYLOAD 4096
+#define PROTO_HEADER_SIZE 4     /* SYNC + TYPE + LENGTH(2) */
+#define PROTO_CRC_SIZE    1
 
-/* --- USB CDC --- */
-#define USB_TX_BUF_SIZE     4096
-#define USB_RX_BUF_SIZE     256
+/* ---------- CRC-8 MAXIM ---------- */
+#define CRC8_POLY         0x31
+#define CRC8_INIT         0x00
 
-#endif /* PICO_OSC_CONFIG_H */
+/* ---------- Trigger Configuration ---------- */
+#define TRIGGER_NONE      0
+#define TRIGGER_RISING    1
+#define TRIGGER_FALLING   2
+#define TRIGGER_BOTH      3
+
+/* ---------- Status Codes ---------- */
+#define STATUS_OK         0x00
+#define STATUS_BUSY       0x01
+#define STATUS_ERROR      0x02
+#define STATUS_OVERFLOW   0x03
+
+/* ---------- Timing ---------- */
+#define LED_BLINK_MS      500   /* Status LED blink interval */
+#define USB_POLL_MS       1     /* USB polling interval */
+
+#endif /* CONFIG_H */

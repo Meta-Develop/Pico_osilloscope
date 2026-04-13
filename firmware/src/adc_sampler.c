@@ -1,116 +1,164 @@
+/**
+ * adc_sampler.c — 4-Channel ADC Sampler
+ *
+ * DMA-based continuous ADC sampling with ping-pong buffer scheme.
+ * Round-robin across enabled channels (up to 4).
+ */
+
 #include "adc_sampler.h"
 #include "config.h"
-
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "pico/stdlib.h"
+#include <string.h>
 
-static uint16_t dma_buf_a[ADC_DMA_BUF_SIZE] __attribute__((aligned(4)));
-static uint16_t dma_buf_b[ADC_DMA_BUF_SIZE] __attribute__((aligned(4)));
-static volatile bool buf_a_ready = false;
-static volatile bool buf_b_ready = false;
-static volatile bool using_buf_a = true;
 static int dma_chan = -1;
-static uint8_t active_channels = 0x07; /* ADC0-2 by default */
+static uint8_t active_channels = 0;
+static uint8_t channel_mask_config = 0;
+static bool running = false;
 
-static void dma_irq_handler(void) {
-    if (dma_channel_get_irq0_status(dma_chan)) {
-        dma_channel_acknowledge_irq0(dma_chan);
+/* Ping-pong buffers */
+static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
+    adc_buf_a[ADC_BUFFER_SIZE];
+static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
+    adc_buf_b[ADC_BUFFER_SIZE];
+static volatile uint16_t *read_buf = adc_buf_a;
+static volatile uint32_t samples_ready = 0;
+static volatile bool buf_ready = false;
 
-        if (using_buf_a) {
-            buf_a_ready = true;
-            dma_channel_set_write_addr(dma_chan, dma_buf_b, true);
+static void adc_dma_irq_handler(void) {
+    if (dma_hw->ints1 & (1u << dma_chan)) {
+        dma_hw->ints1 = (1u << dma_chan);
+
+        /* Swap buffers */
+        if (dma_channel_hw_addr(dma_chan)->write_addr == (uintptr_t)adc_buf_b) {
+            read_buf = adc_buf_a;
+            dma_channel_set_write_addr(dma_chan, adc_buf_b, true);
         } else {
-            buf_b_ready = true;
-            dma_channel_set_write_addr(dma_chan, dma_buf_a, true);
+            read_buf = adc_buf_b;
+            dma_channel_set_write_addr(dma_chan, adc_buf_a, true);
         }
-        using_buf_a = !using_buf_a;
+        samples_ready = ADC_BUFFER_SIZE;
+        buf_ready = true;
     }
 }
 
-void adc_sampler_init(void) {
+void adc_sampler_init(uint8_t channel_mask) {
+    channel_mask_config = channel_mask & 0x0F;
+
     adc_init();
 
-    /* Configure ADC pins */
-    adc_gpio_init(26); /* ADC0 */
-    adc_gpio_init(27); /* ADC1 */
-    adc_gpio_init(28); /* ADC2 */
+    /* Count and configure active channels */
+    active_channels = 0;
+    for (uint8_t ch = 0; ch < ADC_CHANNELS; ch++) {
+        if (channel_mask_config & (1u << ch)) {
+            adc_gpio_init(GPIO_ADC_START + ch);
+            active_channels++;
+        }
+    }
 
-    /* Claim a DMA channel */
-    dma_chan = dma_claim_unused_channel(true);
-}
+    if (active_channels == 0) {
+        return;
+    }
 
-void adc_sampler_start(uint32_t sample_rate_hz) {
-    /* Configure ADC for round-robin sampling */
-    adc_select_input(0);
-    adc_set_round_robin(active_channels);
-    adc_fifo_setup(true, true, 1, false, false);
+    /* Configure round-robin if multiple channels */
+    if (active_channels > 1) {
+        adc_set_round_robin(channel_mask_config);
+    } else {
+        /* Single channel: find which one */
+        for (uint8_t ch = 0; ch < ADC_CHANNELS; ch++) {
+            if (channel_mask_config & (1u << ch)) {
+                adc_select_input(ch);
+                break;
+            }
+        }
+        adc_set_round_robin(0);
+    }
 
-    /* Clock divider: 48MHz USB clock / desired rate */
-    float clk_div = 48000000.0f / (float)sample_rate_hz;
-    adc_set_clkdiv(clk_div - 1.0f);
-
-    /* Configure DMA */
-    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
-    channel_config_set_read_increment(&cfg, false);
-    channel_config_set_write_increment(&cfg, true);
-    channel_config_set_dreq(&cfg, DREQ_ADC);
-
-    dma_channel_configure(dma_chan, &cfg,
-        dma_buf_a,          /* write address */
-        &adc_hw->fifo,      /* read address */
-        ADC_DMA_BUF_SIZE,   /* transfer count */
-        false               /* don't start yet */
+    /* Free-running mode */
+    adc_fifo_setup(
+        true,   /* Enable FIFO */
+        true,   /* Enable DMA request */
+        1,      /* DREQ threshold */
+        false,  /* No error bit */
+        false   /* No byte shift (keep 12-bit) */
     );
 
-    /* Enable DMA IRQ */
-    dma_channel_set_irq0_enabled(dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
-    irq_set_enabled(DMA_IRQ_0, true);
+    /* Fastest sampling: divider = 0 */
+    adc_set_clkdiv(0);
 
-    buf_a_ready = false;
-    buf_b_ready = false;
-    using_buf_a = true;
+    /* Configure DMA */
+    dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config dc = dma_channel_get_default_config(dma_chan);
+    channel_config_set_transfer_data_size(&dc, DMA_SIZE_16);
+    channel_config_set_read_increment(&dc, false);
+    channel_config_set_write_increment(&dc, true);
+    channel_config_set_dreq(&dc, DREQ_ADC);
 
-    /* Start DMA and ADC */
-    dma_channel_start(dma_chan);
+    dma_channel_configure(
+        dma_chan,
+        &dc,
+        adc_buf_a,        /* Write address */
+        &adc_hw->fifo,    /* Read address */
+        ADC_BUFFER_SIZE,   /* Transfer count */
+        false              /* Don't start yet */
+    );
+
+    /* DMA interrupt on IRQ1 (IRQ0 used by pin_monitor) */
+    dma_channel_set_irq1_enabled(dma_chan, true);
+    irq_set_exclusive_handler(DMA_IRQ_1, adc_dma_irq_handler);
+    irq_set_enabled(DMA_IRQ_1, true);
+}
+
+void adc_sampler_start(void) {
+    if (running || active_channels == 0) return;
+
+    buf_ready = false;
+    samples_ready = 0;
+
+    /* Start DMA */
+    dma_channel_set_write_addr(dma_chan, adc_buf_a, true);
+
+    /* Start ADC free-running */
     adc_run(true);
+    running = true;
 }
 
 void adc_sampler_stop(void) {
+    if (!running) return;
+
     adc_run(false);
     adc_fifo_drain();
     dma_channel_abort(dma_chan);
-    buf_a_ready = false;
-    buf_b_ready = false;
+    running = false;
 }
 
-bool adc_sampler_buffer_ready(void) {
-    return buf_a_ready || buf_b_ready;
+uint32_t adc_sampler_available(void) {
+    return buf_ready ? samples_ready : 0;
 }
 
-const uint16_t *adc_sampler_get_buffer(uint32_t *out_len) {
-    if (buf_a_ready) {
-        *out_len = ADC_DMA_BUF_SIZE;
-        return dma_buf_a;
+uint32_t adc_sampler_read(uint16_t *buffer, uint32_t count) {
+    if (!buf_ready || samples_ready == 0) {
+        return 0;
     }
-    if (buf_b_ready) {
-        *out_len = ADC_DMA_BUF_SIZE;
-        return dma_buf_b;
-    }
-    *out_len = 0;
-    return NULL;
+
+    uint32_t to_read = (count < samples_ready) ? count : samples_ready;
+    memcpy(buffer, (const void *)read_buf, to_read * sizeof(uint16_t));
+
+    buf_ready = false;
+    samples_ready = 0;
+    return to_read;
 }
 
-void adc_sampler_release_buffer(void) {
-    if (buf_a_ready) {
-        buf_a_ready = false;
-    } else if (buf_b_ready) {
-        buf_b_ready = false;
-    }
+void adc_sampler_set_divider(uint16_t divider) {
+    adc_set_clkdiv((float)divider);
 }
 
-void adc_sampler_set_channels(uint8_t channel_mask) {
-    active_channels = channel_mask & 0x07;
+uint8_t adc_sampler_channel_count(void) {
+    return active_channels;
+}
+
+bool adc_sampler_is_running(void) {
+    return running;
 }

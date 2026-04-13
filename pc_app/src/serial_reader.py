@@ -1,135 +1,230 @@
-"""Pico Oscilloscope - Serial communication protocol."""
+"""
+serial_reader.py — Serial Communication with Pico Oscilloscope
 
-from __future__ import annotations
+Binary protocol parser for USB CDC serial communication.
+Handles frame encoding/decoding, CRC verification, and data conversion.
+"""
 
 import struct
-from dataclasses import dataclass
-from enum import IntEnum
+import time
+from typing import Optional, Tuple
 
 import serial
 
+# Protocol constants
+PROTO_SYNC = 0xAA
+PROTO_HEADER_SIZE = 4
+PROTO_MAX_PAYLOAD = 4096
 
-class MsgType(IntEnum):
-    """Message types for Pico <-> PC communication."""
+# Message types (Pico -> PC)
+MSG_PIN_DATA = 0x01
+MSG_ADC_DATA = 0x02
+MSG_TRIGGER = 0x03
+MSG_STATUS = 0x20
+MSG_ERROR = 0xFF
 
-    # Pico -> PC
-    PIN_DATA = 0x01
-    ADC_DATA = 0x02
-    WAVE_DATA = 0x03
-    STATUS = 0x20
-    ERROR = 0xFF
+# Command types (PC -> Pico)
+CMD_CONFIG = 0x10
+CMD_START = 0x11
+CMD_STOP = 0x12
+CMD_MODE = 0x13
+CMD_TRIGGER = 0x14
 
-    # PC -> Pico
-    CMD_CONFIG = 0x10
-    CMD_START = 0x11
-    CMD_STOP = 0x12
-    CMD_MODE = 0x13
+# Modes
+MODE_HAT = 0
+MODE_OSCILLOSCOPE = 1
 
+# Status codes
+STATUS_OK = 0x00
+STATUS_BUSY = 0x01
+STATUS_ERROR = 0x02
+STATUS_OVERFLOW = 0x03
 
-SYNC_BYTE = 0xAA
+# CRC-8 MAXIM
+CRC8_POLY = 0x31
+CRC8_INIT = 0x00
 
 
 def crc8_maxim(data: bytes) -> int:
-    """CRC-8/MAXIM (Dallas) calculation."""
-    crc = 0x00
+    """Compute CRC-8 MAXIM checksum."""
+    crc = CRC8_INIT
     for byte in data:
         crc ^= byte
         for _ in range(8):
-            if crc & 0x01:
-                crc = (crc >> 1) ^ 0x8C
+            if crc & 0x80:
+                crc = ((crc << 1) ^ CRC8_POLY) & 0xFF
             else:
-                crc >>= 1
+                crc = (crc << 1) & 0xFF
     return crc
 
 
-@dataclass
-class Frame:
-    """A decoded protocol frame."""
-
-    msg_type: MsgType
-    payload: bytes
-
-
-def build_frame(msg_type: int, payload: bytes = b"") -> bytes:
-    """Build a binary protocol frame."""
-    length = len(payload)
-    header = struct.pack("<BBH", SYNC_BYTE, msg_type, length)
-    crc_data = struct.pack("<BH", msg_type, length) + payload
-    crc = crc8_maxim(crc_data)
-    return header + payload + struct.pack("B", crc)
-
-
 class SerialReader:
-    """Reads and parses framed data from a Pico via USB CDC serial."""
+    """Serial communication handler for Pico Oscilloscope."""
 
-    def __init__(self, port: str, baudrate: int = 115200):
-        self._ser = serial.Serial(port, baudrate, timeout=0.01)
-        self._buf = bytearray()
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 1.0):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.ser: Optional[serial.Serial] = None
 
-    def close(self) -> None:
-        self._ser.close()
+    def connect(self) -> bool:
+        """Open serial connection."""
+        try:
+            self.ser = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                timeout=self.timeout,
+            )
+            return True
+        except serial.SerialException as e:
+            print(f"Connection failed: {e}")
+            return False
+
+    def disconnect(self):
+        """Close serial connection."""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            self.ser = None
 
     @property
-    def is_open(self) -> bool:
-        return self._ser.is_open
+    def connected(self) -> bool:
+        return self.ser is not None and self.ser.is_open
 
-    def send_command(self, msg_type: int, payload: bytes = b"") -> None:
+    def send_command(self, cmd_type: int, payload: bytes = b"") -> bool:
         """Send a command frame to the Pico."""
-        frame = build_frame(msg_type, payload)
-        self._ser.write(frame)
-        self._ser.flush()
+        if not self.connected:
+            return False
 
-    def start_sampling(self) -> None:
-        self.send_command(MsgType.CMD_START)
+        length = len(payload)
+        header = struct.pack("<BBH", PROTO_SYNC, cmd_type, length)
 
-    def stop_sampling(self) -> None:
-        self.send_command(MsgType.CMD_STOP)
+        # CRC over type + length + payload
+        crc_data = header[1:]  # Skip sync byte
+        if payload:
+            crc_data += payload
+        crc = crc8_maxim(crc_data)
 
-    def set_mode(self, mode: int) -> None:
-        self.send_command(MsgType.CMD_MODE, struct.pack("B", mode))
+        frame = header + payload + bytes([crc])
 
-    def read_frames(self) -> list[Frame]:
-        """Read available data and return any complete frames."""
-        data = self._ser.read(self._ser.in_waiting or 1)
-        if data:
-            self._buf.extend(data)
+        try:
+            self.ser.write(frame)
+            self.ser.flush()
+            return True
+        except serial.SerialException:
+            return False
 
-        frames: list[Frame] = []
-        while True:
-            frame = self._try_parse_frame()
-            if frame is None:
-                break
-            frames.append(frame)
-        return frames
+    def receive_frame(self, timeout: Optional[float] = None) -> Optional[Tuple[int, bytes]]:
+        """
+        Receive and parse a single protocol frame.
 
-    def _try_parse_frame(self) -> Frame | None:
-        """Try to parse one frame from the internal buffer."""
-        # Find sync byte
-        while len(self._buf) > 0 and self._buf[0] != SYNC_BYTE:
-            self._buf.pop(0)
-
-        # Need at least: SYNC(1) + TYPE(1) + LEN(2) + CRC(1) = 5 bytes
-        if len(self._buf) < 5:
+        Returns (message_type, payload) or None on timeout/error.
+        """
+        if not self.connected:
             return None
 
-        msg_type = self._buf[1]
-        length = struct.unpack_from("<H", self._buf, 2)[0]
+        old_timeout = self.ser.timeout
+        if timeout is not None:
+            self.ser.timeout = timeout
 
-        total = 4 + length + 1  # header + payload + crc
-        if len(self._buf) < total:
+        try:
+            # Wait for sync byte
+            while True:
+                byte = self.ser.read(1)
+                if not byte:
+                    return None
+                if byte[0] == PROTO_SYNC:
+                    break
+
+            # Read type + length (3 bytes)
+            header = self.ser.read(3)
+            if len(header) < 3:
+                return None
+
+            msg_type = header[0]
+            length = struct.unpack("<H", header[1:3])[0]
+
+            if length > PROTO_MAX_PAYLOAD:
+                return None
+
+            # Read payload
+            payload = b""
+            if length > 0:
+                payload = self.ser.read(length)
+                if len(payload) < length:
+                    return None
+
+            # Read and verify CRC
+            crc_byte = self.ser.read(1)
+            if len(crc_byte) < 1:
+                return None
+
+            crc_data = header + payload
+            expected_crc = crc8_maxim(crc_data)
+
+            if crc_byte[0] != expected_crc:
+                return None  # CRC mismatch
+
+            return (msg_type, payload)
+
+        except serial.SerialException:
             return None
+        finally:
+            self.ser.timeout = old_timeout
 
-        payload = bytes(self._buf[4 : 4 + length])
-        received_crc = self._buf[4 + length]
+    def start_sampling(self) -> bool:
+        """Send start command and wait for status response."""
+        if not self.send_command(CMD_START):
+            return False
+        return self._wait_status_ok()
 
-        # Verify CRC
-        crc_data = struct.pack("<BH", msg_type, length) + payload
-        expected_crc = crc8_maxim(crc_data)
+    def stop_sampling(self) -> bool:
+        """Send stop command and wait for status response."""
+        if not self.send_command(CMD_STOP):
+            return False
+        return self._wait_status_ok()
 
-        # Consume the frame from buffer
-        del self._buf[:total]
+    def set_mode(self, mode: int) -> bool:
+        """Switch operating mode (MODE_HAT or MODE_OSCILLOSCOPE)."""
+        if not self.send_command(CMD_MODE, bytes([mode])):
+            return False
+        return self._wait_status_ok()
 
-        if received_crc != expected_crc:
-            return None  # CRC mismatch, discard
+    def configure_trigger(self, channel: int, mode: int, level: int) -> bool:
+        """Configure edge trigger for oscilloscope mode."""
+        payload = struct.pack("<BBH", channel, mode, level)
+        if not self.send_command(CMD_TRIGGER, payload):
+            return False
+        return self._wait_status_ok()
 
-        return Frame(msg_type=MsgType(msg_type), payload=payload)
+    def _wait_status_ok(self, timeout: float = 2.0) -> bool:
+        """Wait for a STATUS_OK response."""
+        result = self.receive_frame(timeout=timeout)
+        if result is None:
+            return False
+        msg_type, payload = result
+        return msg_type == MSG_STATUS and len(payload) > 0 and payload[0] == STATUS_OK
+
+    @staticmethod
+    def decode_pin_data(payload: bytes) -> list:
+        """Decode PIN_DATA payload into list of 32-bit GPIO snapshots."""
+        snapshots = []
+        for i in range(0, len(payload), 4):
+            if i + 4 <= len(payload):
+                val = struct.unpack("<I", payload[i:i+4])[0]
+                snapshots.append(val)
+        return snapshots
+
+    @staticmethod
+    def decode_adc_data(payload: bytes) -> list:
+        """Decode ADC_DATA payload into list of 16-bit sample values."""
+        samples = []
+        for i in range(0, len(payload), 2):
+            if i + 2 <= len(payload):
+                val = struct.unpack("<H", payload[i:i+2])[0]
+                samples.append(val)
+        return samples
+
+    @staticmethod
+    def adc_to_voltage(value: int, vref: float = 3.3) -> float:
+        """Convert 12-bit ADC value to voltage."""
+        return (value / 4095.0) * vref

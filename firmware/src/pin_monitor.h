@@ -1,32 +1,71 @@
-#ifndef PICO_OSC_PIN_MONITOR_H
-#define PICO_OSC_PIN_MONITOR_H
+/**
+ * pin_monitor.h — PIO-Based GPIO Pin Monitor
+ *
+ * High-speed parallel GPIO sampling using PIO state machines.
+ * Used in both Hat Mode (all pins) and Oscilloscope Mode (digital channels).
+ */
+
+#ifndef PIN_MONITOR_H
+#define PIN_MONITOR_H
 
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Initialize GPIO pins for digital monitoring (input, hi-Z) */
-void pin_monitor_init(void);
+/**
+ * Initialize PIO-based pin monitoring.
+ * Configures PIO0 for GPIO sampling and DMA for buffer transfers.
+ *
+ * @param pin_mask Bitmask of GPIO pins to monitor
+ */
+void pin_monitor_init(uint32_t pin_mask);
 
-/* Sample all monitored GPIO pins. Returns a 32-bit bitmask of pin states. */
-uint32_t pin_monitor_sample(void);
+/**
+ * Start continuous pin monitoring.
+ * PIO samples GPIO states into DMA buffer continuously.
+ */
+void pin_monitor_start(void);
 
-/* Start periodic pin sampling at the given rate */
-void pin_monitor_start(uint32_t sample_rate_hz);
-
-/* Stop periodic sampling */
+/**
+ * Stop pin monitoring.
+ */
 void pin_monitor_stop(void);
 
-/* Check if a sample batch is ready */
-bool pin_monitor_data_ready(void);
+/**
+ * Get the current GPIO snapshot (single read).
+ *
+ * @return 32-bit value with each bit representing a GPIO state
+ */
+uint32_t pin_monitor_read_once(void);
 
-/* Get sampled pin data. Returns number of samples written to buf.
-   Each sample is a 32-bit bitmask of GPIO states. */
-uint32_t pin_monitor_get_data(uint32_t *buf, uint32_t max_samples);
+/**
+ * Get the number of buffered snapshots available.
+ *
+ * @return Number of 32-bit snapshots ready to read
+ */
+uint32_t pin_monitor_available(void);
 
-/* Set which GPIO pins to monitor (bitmask) */
-void pin_monitor_set_mask(uint32_t gpio_mask);
+/**
+ * Read buffered pin snapshots.
+ *
+ * @param buffer Output buffer for 32-bit GPIO snapshots
+ * @param count  Maximum number of snapshots to read
+ * @return Actual number of snapshots read
+ */
+uint32_t pin_monitor_read(uint32_t *buffer, uint32_t count);
 
-/* Get current monitoring mask */
-uint32_t pin_monitor_get_mask(void);
+/**
+ * Check if pin monitor is currently running.
+ *
+ * @return true if sampling is active
+ */
+bool pin_monitor_is_running(void);
 
-#endif /* PICO_OSC_PIN_MONITOR_H */
+/**
+ * Set the sampling clock divider.
+ * Effective sample rate = system_clock / divider.
+ *
+ * @param divider PIO clock divider (1.0 = system clock speed)
+ */
+void pin_monitor_set_divider(float divider);
+
+#endif /* PIN_MONITOR_H */

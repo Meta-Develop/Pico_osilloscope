@@ -1,107 +1,112 @@
-#include <stdio.h>
-#include "pico/stdlib.h"
-#include "hardware/gpio.h"
+/**
+ * main.c — Pico Oscilloscope Entry Point
+ *
+ * Initializes hardware and runs the selected operating mode.
+ * Default mode: Hat Mode (all-digital GPIO monitoring).
+ */
 
 #include "config.h"
 #include "usb_comm.h"
 #include "hat_mode.h"
+#include "osc_mode.h"
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+#include "tusb.h"
 
-static uint8_t current_mode = DEFAULT_MODE;
+static uint8_t current_mode = MODE_HAT;
 
 static void led_init(void) {
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
-    gpio_put(LED_PIN, 0);
+    gpio_init(GPIO_LED);
+    gpio_set_dir(GPIO_LED, GPIO_OUT);
+    gpio_put(GPIO_LED, 0);
 }
 
-static void led_toggle(void) {
-    gpio_xor_mask(1u << LED_PIN);
+static void led_set(bool on) {
+    gpio_put(GPIO_LED, on);
 }
 
-static void handle_command(void) {
-    uint8_t buf[USB_RX_BUF_SIZE];
-    uint16_t len = 0;
-    uint8_t type = usb_comm_read_cmd(buf, &len, sizeof(buf));
+static void wait_for_usb(void) {
+    /* Blink LED while waiting for USB connection */
+    bool led_state = false;
+    while (!tud_cdc_connected()) {
+        tud_task();
+        led_state = !led_state;
+        led_set(led_state);
+        sleep_ms(LED_BLINK_MS);
+    }
+    led_set(true);
+}
 
-    switch (type) {
-    case CMD_START:
-        if (current_mode == MODE_HAT) {
-            hat_mode_start();
-        }
-        break;
+static void handle_idle_commands(void) {
+    uint8_t cmd_buf[PROTO_MAX_PAYLOAD];
+    uint8_t cmd_type;
+    uint16_t cmd_len;
 
-    case CMD_STOP:
-        if (current_mode == MODE_HAT) {
-            hat_mode_stop();
-        }
-        break;
-
-    case CMD_MODE:
-        if (len >= 1) {
-            uint8_t new_mode = buf[0];
-            if (new_mode != current_mode) {
-                /* Stop current mode */
-                if (current_mode == MODE_HAT) hat_mode_stop();
-
-                current_mode = new_mode;
-
-                /* Send status acknowledgement */
-                uint8_t status = current_mode;
-                usb_comm_send(MSG_STATUS, &status, 1);
+    /* Process commands while not in a mode */
+    while (usb_comm_receive_command(&cmd_type, cmd_buf, &cmd_len, sizeof(cmd_buf))) {
+        switch (cmd_type) {
+        case CMD_MODE:
+            if (cmd_len >= 1) {
+                current_mode = cmd_buf[0];
+                usb_comm_send_status(STATUS_OK);
             }
+            break;
+
+        case CMD_START:
+            usb_comm_send_status(STATUS_OK);
+            return; /* Exit idle loop to start mode */
+
+        default:
+            usb_comm_send_status(STATUS_OK);
+            break;
         }
-        break;
-
-    case CMD_CONFIG:
-        /* Configuration commands - extensible */
-        break;
-
-    default:
-        break;
     }
 }
 
 int main(void) {
-    /* Initialize USB CDC */
+    /* Initialize core peripherals */
+    led_init();
     usb_comm_init();
 
-    /* LED for status */
-    led_init();
+    /* Wait for USB host connection */
+    wait_for_usb();
 
-    /* Print startup message */
-    printf("Pico Oscilloscope v%d.%d.%d\n",
-           FIRMWARE_VERSION_MAJOR,
-           FIRMWARE_VERSION_MINOR,
-           FIRMWARE_VERSION_PATCH);
-    printf("Mode: %s\n",
-           current_mode == MODE_HAT ? "Hat" : "Oscilloscope");
-
-    /* Initialize default mode */
-    if (current_mode == MODE_HAT) {
-        hat_mode_init();
-    }
-
-    uint32_t led_counter = 0;
-
-    /* Main loop */
     while (true) {
-        /* Poll USB for incoming commands */
-        usb_comm_poll();
+        int next_mode;
 
-        /* Handle received commands */
-        if (usb_comm_cmd_available()) {
-            handle_command();
+        switch (current_mode) {
+        case MODE_HAT:
+            hat_mode_init();
+            next_mode = hat_mode_run();
+            hat_mode_stop();
+            break;
+
+        case MODE_OSCILLOSCOPE:
+            osc_mode_init();
+            next_mode = osc_mode_run();
+            osc_mode_stop();
+            break;
+
+        default:
+            current_mode = MODE_HAT;
+            continue;
         }
 
-        /* Run active mode */
-        if (current_mode == MODE_HAT) {
-            hat_mode_tick();
-        }
-
-        /* Blink LED as heartbeat */
-        if (++led_counter >= 100000) {
-            led_toggle();
-            led_counter = 0;
+        /* Handle mode switch or stop */
+        if (next_mode >= 0) {
+            current_mode = (uint8_t)next_mode;
+        } else {
+            /* Stopped: wait for new command */
+            led_set(true);
+            while (true) {
+                tud_task();
+                handle_idle_commands();
+                if (usb_comm_connected()) {
+                    /* Check if start command was processed */
+                    break;
+                }
+                sleep_ms(USB_POLL_MS);
+            }
         }
     }
 

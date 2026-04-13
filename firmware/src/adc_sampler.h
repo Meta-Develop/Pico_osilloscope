@@ -1,29 +1,71 @@
-#ifndef PICO_OSC_ADC_SAMPLER_H
-#define PICO_OSC_ADC_SAMPLER_H
+/**
+ * adc_sampler.h — 4-Channel ADC Sampler
+ *
+ * DMA-based continuous ADC sampling for oscilloscope mode.
+ * Supports 1-4 channel round-robin with configurable sample rate.
+ */
+
+#ifndef ADC_SAMPLER_H
+#define ADC_SAMPLER_H
 
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Initialize ADC hardware and DMA */
-void adc_sampler_init(void);
+/**
+ * Initialize ADC hardware and DMA for multi-channel sampling.
+ *
+ * @param channel_mask Bitmask of ADC channels to enable (0x0F = all 4)
+ */
+void adc_sampler_init(uint8_t channel_mask);
 
-/* Start continuous ADC sampling with DMA */
-void adc_sampler_start(uint32_t sample_rate_hz);
+/**
+ * Start continuous ADC sampling.
+ * Samples are collected via DMA into ping-pong buffers.
+ */
+void adc_sampler_start(void);
 
-/* Stop ADC sampling */
+/**
+ * Stop ADC sampling.
+ */
 void adc_sampler_stop(void);
 
-/* Check if a DMA buffer is ready for reading */
-bool adc_sampler_buffer_ready(void);
+/**
+ * Get the number of samples available in the read buffer.
+ *
+ * @return Number of 16-bit ADC samples ready
+ */
+uint32_t adc_sampler_available(void);
 
-/* Get pointer to completed sample buffer and its length.
-   Returns NULL if no buffer is ready. */
-const uint16_t *adc_sampler_get_buffer(uint32_t *out_len);
+/**
+ * Read ADC samples from the buffer.
+ * Samples are interleaved by channel in round-robin order.
+ *
+ * @param buffer Output buffer for 16-bit samples
+ * @param count  Maximum number of samples to read
+ * @return Actual number of samples read
+ */
+uint32_t adc_sampler_read(uint16_t *buffer, uint32_t count);
 
-/* Release the buffer after reading */
-void adc_sampler_release_buffer(void);
+/**
+ * Set the ADC sample rate divider.
+ * Effective rate = 48MHz / (96 * (1 + divider)).
+ *
+ * @param divider Clock divider value (0 = fastest)
+ */
+void adc_sampler_set_divider(uint16_t divider);
 
-/* Set which ADC channels to sample (bitmask, bits 0-2 for ADC0-ADC2) */
-void adc_sampler_set_channels(uint8_t channel_mask);
+/**
+ * Get the number of active ADC channels.
+ *
+ * @return Channel count (1-4)
+ */
+uint8_t adc_sampler_channel_count(void);
 
-#endif /* PICO_OSC_ADC_SAMPLER_H */
+/**
+ * Check if ADC sampler is running.
+ *
+ * @return true if sampling is active
+ */
+bool adc_sampler_is_running(void);
+
+#endif /* ADC_SAMPLER_H */
