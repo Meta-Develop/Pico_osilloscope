@@ -20,6 +20,96 @@ static uint8_t trigger_mode = TRIGGER_NONE;
 static uint16_t trigger_level = ADC_MAX_VALUE / 2;
 static uint16_t last_adc_value = 0;
 static bool triggered = false;
+static bool osc_digital_enabled = true;
+
+bool osc_mode_apply_trigger_config(const uint8_t *payload, uint16_t length) {
+    uint16_t level;
+
+    if (length < 4) {
+        return false;
+    }
+
+    level = payload[2] | ((uint16_t)payload[3] << 8);
+
+    if (payload[0] >= ADC_CHANNELS || payload[1] > TRIGGER_BOTH || level > ADC_MAX_VALUE) {
+        return false;
+    }
+
+    trigger_channel = payload[0];
+    trigger_mode = payload[1];
+    trigger_level = level;
+    triggered = false;
+    last_adc_value = 0;
+    return true;
+}
+
+bool osc_mode_apply_config(const uint8_t *payload, uint16_t length) {
+    if (length < 1) {
+        return false;
+    }
+
+    switch (payload[0]) {
+    case CFG_OSC_ADC_DIVIDER:
+        if (length == 2) {
+            break;
+        }
+
+        if (length < 3) {
+            return false;
+        }
+
+        adc_sampler_set_divider(payload[1] | ((uint16_t)payload[2] << 8));
+        return true;
+
+    case CFG_OSC_DIGITAL_ENABLE: {
+        if (length == 2) {
+            break;
+        }
+
+        if (length < 3) {
+            return false;
+        }
+
+        bool enable = payload[1] != 0;
+
+        if (enable != osc_digital_enabled) {
+            osc_digital_enabled = enable;
+
+            if (adc_sampler_is_running()) {
+                if (osc_digital_enabled) {
+                    pin_monitor_start();
+                } else if (pin_monitor_is_running()) {
+                    pin_monitor_stop();
+                }
+            }
+        }
+
+        return true;
+    }
+
+    case CFG_OSC_PIN_DIVIDER: {
+        if (length < (uint16_t)(1 + sizeof(float))) {
+            return false;
+        }
+
+        float divider;
+        memcpy(&divider, &payload[1], sizeof(float));
+        pin_monitor_set_divider(divider);
+        return true;
+    }
+
+    default:
+        break;
+    }
+
+    if (length == 2) {
+        uint16_t divider = payload[0] | ((uint16_t)payload[1] << 8);
+        adc_sampler_set_divider(divider);
+        return true;
+    }
+
+    return false;
+}
 
 static bool check_trigger(uint16_t value) {
     if (trigger_mode == TRIGGER_NONE) {
@@ -59,14 +149,18 @@ void osc_mode_init(void) {
 int osc_mode_run(void) {
     uint16_t adc_buf[ADC_BUFFER_SIZE];
     uint32_t pin_buf[PIN_BUFFER_SIZE];
-    uint8_t cmd_buf[PROTO_MAX_PAYLOAD];
+    uint8_t cmd_buf[PROTO_MAX_COMMAND_PAYLOAD];
     uint8_t cmd_type;
     uint16_t cmd_len;
 
     adc_sampler_start();
-    pin_monitor_start();
+    if (osc_digital_enabled) {
+        pin_monitor_start();
+    }
 
     while (true) {
+        usb_comm_task();
+
         /* Check for commands */
         if (usb_comm_receive_command(&cmd_type, cmd_buf, &cmd_len, sizeof(cmd_buf))) {
             switch (cmd_type) {
@@ -79,30 +173,26 @@ int osc_mode_run(void) {
             case CMD_MODE:
                 adc_sampler_stop();
                 pin_monitor_stop();
-                if (cmd_len >= 1) {
+                if (cmd_len >= 1 && cmd_buf[0] <= MODE_OSCILLOSCOPE) {
                     usb_comm_send_status(STATUS_OK);
                     return cmd_buf[0];
                 }
-                usb_comm_send_status(STATUS_OK);
+                usb_comm_send_error(STATUS_ERROR, "Invalid mode");
                 return -1;
 
             case CMD_TRIGGER:
-                /* Trigger config: [channel(1) | mode(1) | level(2 LE)] */
-                if (cmd_len >= 4) {
-                    trigger_channel = cmd_buf[0];
-                    trigger_mode = cmd_buf[1];
-                    trigger_level = cmd_buf[2] | ((uint16_t)cmd_buf[3] << 8);
-                    triggered = false;
+                if (osc_mode_apply_trigger_config(cmd_buf, cmd_len)) {
                     usb_comm_send_status(STATUS_OK);
+                } else {
+                    usb_comm_send_error(STATUS_ERROR, "Invalid trigger configuration");
                 }
                 break;
 
             case CMD_CONFIG:
-                /* ADC divider config */
-                if (cmd_len >= 2) {
-                    uint16_t div = cmd_buf[0] | ((uint16_t)cmd_buf[1] << 8);
-                    adc_sampler_set_divider(div);
+                if (osc_mode_apply_config(cmd_buf, cmd_len)) {
                     usb_comm_send_status(STATUS_OK);
+                } else {
+                    usb_comm_send_error(STATUS_ERROR, "Invalid oscilloscope configuration");
                 }
                 break;
 
@@ -112,7 +202,12 @@ int osc_mode_run(void) {
         }
 
         /* Stream ADC data */
-        uint32_t adc_count = adc_sampler_read(adc_buf, ADC_BUFFER_SIZE);
+        uint64_t adc_start_time_ps;
+        uint64_t adc_interval_ps;
+        uint32_t adc_count = adc_sampler_read(adc_buf,
+                                              ADC_BUFFER_SIZE,
+                                              &adc_start_time_ps,
+                                              &adc_interval_ps);
         if (adc_count > 0) {
             /* Check trigger if configured */
             if (trigger_mode != TRIGGER_NONE && !triggered) {
@@ -132,37 +227,50 @@ int osc_mode_run(void) {
                 }
             }
 
-            /* Send ADC data */
-            uint32_t bytes = adc_count * sizeof(uint16_t);
-            uint32_t offset = 0;
-            while (offset < bytes) {
-                uint16_t chunk = (uint16_t)((bytes - offset > PROTO_MAX_PAYLOAD)
-                                            ? PROTO_MAX_PAYLOAD
-                                            : (bytes - offset));
-                usb_comm_send_frame(MSG_ADC_DATA,
-                                    (const uint8_t *)adc_buf + offset,
-                                    chunk);
-                offset += chunk;
-            }
+            usb_comm_send_adc_batches(adc_start_time_ps,
+                                      adc_interval_ps,
+                                      adc_sampler_channel_count(),
+                                      adc_buf,
+                                      adc_count);
+        }
+
+        uint32_t adc_overrun_count = adc_sampler_take_overrun_count();
+        if (adc_overrun_count > 0) {
+            usb_comm_send_overflow_report("ADC",
+                                          adc_overrun_count,
+                                          adc_overrun_count * ADC_BUFFER_SIZE);
         }
 
         /* Stream digital pin data */
-        uint32_t pin_count = pin_monitor_read(pin_buf, PIN_BUFFER_SIZE);
+        uint64_t pin_start_time_ps;
+        uint64_t pin_interval_ps;
+        uint32_t pin_count = 0;
+
+        if (osc_digital_enabled && pin_monitor_is_running()) {
+            pin_count = pin_monitor_read(pin_buf,
+                                         PIN_BUFFER_SIZE,
+                                         &pin_start_time_ps,
+                                         &pin_interval_ps);
+        }
+
         if (pin_count > 0) {
-            uint32_t bytes = pin_count * sizeof(uint32_t);
-            uint32_t offset = 0;
-            while (offset < bytes) {
-                uint16_t chunk = (uint16_t)((bytes - offset > PROTO_MAX_PAYLOAD)
-                                            ? PROTO_MAX_PAYLOAD
-                                            : (bytes - offset));
-                usb_comm_send_frame(MSG_PIN_DATA,
-                                    (const uint8_t *)pin_buf + offset,
-                                    chunk);
-                offset += chunk;
-            }
+            usb_comm_send_pin_batches(pin_start_time_ps,
+                                      pin_interval_ps,
+                                      OSC_DIGITAL_MASK,
+                                      pin_buf,
+                                      pin_count);
+        }
+
+        uint32_t pin_overrun_count = pin_monitor_take_overrun_count();
+        if (pin_overrun_count > 0) {
+            usb_comm_send_overflow_report("Pin",
+                                          pin_overrun_count,
+                                          pin_overrun_count * PIN_BUFFER_SIZE);
         }
 
     }
+
+    return -1;
 }
 
 void osc_mode_stop(void) {

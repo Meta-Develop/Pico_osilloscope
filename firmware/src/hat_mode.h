@@ -18,6 +18,15 @@
 void hat_mode_init(void);
 
 /**
+ * Apply hat-mode configuration payload from CMD_CONFIG.
+ *
+ * @param payload Configuration payload
+ * @param length Payload length
+ * @return true if the payload was accepted
+ */
+bool hat_mode_apply_config(const uint8_t *payload, uint16_t length);
+
+/**
  * Run hat mode main loop (blocking).
  * Continuously samples GPIO states and streams data over USB.
  * Returns when a CMD_STOP or CMD_MODE command is received.

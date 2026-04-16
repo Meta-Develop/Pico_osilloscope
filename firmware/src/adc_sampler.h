@@ -42,9 +42,14 @@ uint32_t adc_sampler_available(void);
  *
  * @param buffer Output buffer for 16-bit samples
  * @param count  Maximum number of samples to read
+ * @param start_time_ps Output timestamp of the first returned sample
+ * @param sample_interval_ps Output interval between interleaved ADC samples
  * @return Actual number of samples read
  */
-uint32_t adc_sampler_read(uint16_t *buffer, uint32_t count);
+uint32_t adc_sampler_read(uint16_t *buffer,
+						  uint32_t count,
+						  uint64_t *start_time_ps,
+						  uint64_t *sample_interval_ps);
 
 /**
  * Set the ADC sample rate divider.
@@ -60,6 +65,20 @@ void adc_sampler_set_divider(uint16_t divider);
  * @return Channel count (1-4)
  */
 uint8_t adc_sampler_channel_count(void);
+
+/**
+ * Get the interval between interleaved ADC samples.
+ *
+ * @return Sample interval in picoseconds
+ */
+uint64_t adc_sampler_sample_interval_ps(void);
+
+/**
+ * Read and clear the number of unread DMA buffers that were overwritten.
+ *
+ * @return Number of detected ADC capture overruns since the last call
+ */
+uint32_t adc_sampler_take_overrun_count(void);
 
 /**
  * Check if ADC sampler is running.

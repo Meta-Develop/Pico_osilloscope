@@ -18,6 +18,24 @@
 void osc_mode_init(void);
 
 /**
+ * Apply oscilloscope-mode configuration payload from CMD_CONFIG.
+ *
+ * @param payload Configuration payload
+ * @param length Payload length
+ * @return true if the payload was accepted
+ */
+bool osc_mode_apply_config(const uint8_t *payload, uint16_t length);
+
+/**
+ * Apply trigger configuration payload from CMD_TRIGGER.
+ *
+ * @param payload Trigger payload
+ * @param length Payload length
+ * @return true if the payload was accepted
+ */
+bool osc_mode_apply_trigger_config(const uint8_t *payload, uint16_t length);
+
+/**
  * Run oscilloscope mode main loop (blocking).
  * Streams ADC + digital data over USB.
  * Returns when CMD_STOP or CMD_MODE received.

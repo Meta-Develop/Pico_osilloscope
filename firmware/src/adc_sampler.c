@@ -8,8 +8,10 @@
 #include "adc_sampler.h"
 #include "config.h"
 #include "hardware/adc.h"
+#include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include <string.h>
 
@@ -26,9 +28,29 @@ static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
 static uint16_t __attribute__((aligned(ADC_BUFFER_SIZE * 2)))
     adc_buf_b[ADC_BUFFER_SIZE];
 static uint16_t *dma_target_buffer = adc_buf_a;
+static uint64_t dma_target_start_ps = 0;
 static volatile uint16_t *read_buf = adc_buf_a;
+static volatile uint64_t read_start_ps = 0;
 static volatile uint32_t samples_ready = 0;
 static volatile bool buf_ready = false;
+static volatile uint32_t overrun_count = 0;
+
+uint64_t adc_sampler_sample_interval_ps(void) {
+    uint32_t adc_clock_hz = clock_get_hz(clk_adc);
+
+    if (adc_clock_hz == 0) {
+        adc_clock_hz = ADC_CLOCK_HZ;
+    }
+
+    double rate_hz = (double)adc_clock_hz /
+                     ((double)ADC_CONVERSION_CLOCKS * (1.0 + (double)clock_divider));
+
+    if (rate_hz < 1.0) {
+        rate_hz = 1.0;
+    }
+
+    return (uint64_t)((1000000000000.0 / rate_hz) + 0.5);
+}
 
 static uint8_t first_active_channel(void) {
     for (uint8_t ch = 0; ch < ADC_CHANNELS; ch++) {
@@ -42,13 +64,22 @@ static uint8_t first_active_channel(void) {
 
 static void adc_dma_irq_handler(void) {
     if (dma_chan >= 0 && (dma_hw->ints1 & (1u << dma_chan))) {
+        uint64_t batch_start_ps = dma_target_start_ps;
+
         dma_hw->ints1 = (1u << dma_chan);
 
+        if (buf_ready) {
+            overrun_count++;
+        }
+
         read_buf = dma_target_buffer;
+        read_start_ps = batch_start_ps;
         samples_ready = ADC_BUFFER_SIZE;
         buf_ready = true;
 
         dma_target_buffer = (dma_target_buffer == adc_buf_a) ? adc_buf_b : adc_buf_a;
+        dma_target_start_ps = batch_start_ps +
+            ((uint64_t)ADC_BUFFER_SIZE * adc_sampler_sample_interval_ps());
         dma_channel_transfer_to_buffer_now(dma_chan, dma_target_buffer, ADC_BUFFER_SIZE);
     }
 }
@@ -121,7 +152,10 @@ void adc_sampler_start(void) {
     buf_ready = false;
     samples_ready = 0;
     read_buf = adc_buf_a;
+    read_start_ps = 0;
     dma_target_buffer = adc_buf_a;
+    dma_target_start_ps = 0;
+    overrun_count = 0;
 
     adc_fifo_drain();
     dma_channel_abort(dma_chan);
@@ -145,22 +179,61 @@ uint32_t adc_sampler_available(void) {
     return buf_ready ? samples_ready : 0;
 }
 
-uint32_t adc_sampler_read(uint16_t *buffer, uint32_t count) {
+uint32_t adc_sampler_take_overrun_count(void) {
+    uint32_t irq_state = save_and_disable_interrupts();
+    uint32_t count = overrun_count;
+
+    overrun_count = 0;
+    restore_interrupts(irq_state);
+
+    return count;
+}
+
+uint32_t adc_sampler_read(uint16_t *buffer,
+                          uint32_t count,
+                          uint64_t *start_time_ps,
+                          uint64_t *sample_interval_ps) {
+    uint32_t available;
+    uint32_t to_read;
+    const uint16_t *source;
+    uint64_t batch_start_ps;
+    uint32_t irq_state;
+
+    irq_state = save_and_disable_interrupts();
+
     if (!buf_ready || samples_ready == 0) {
+        restore_interrupts(irq_state);
         return 0;
     }
 
-    uint32_t to_read = (count < samples_ready) ? count : samples_ready;
-    memcpy(buffer, (const void *)read_buf, to_read * sizeof(uint16_t));
+    available = samples_ready;
+    to_read = (count < available) ? count : available;
+    source = (const uint16_t *)read_buf;
+    batch_start_ps = read_start_ps;
 
     buf_ready = false;
     samples_ready = 0;
+    restore_interrupts(irq_state);
+
+    memcpy(buffer, source, to_read * sizeof(uint16_t));
+
+    if (start_time_ps != NULL) {
+        *start_time_ps = batch_start_ps;
+    }
+
+    if (sample_interval_ps != NULL) {
+        *sample_interval_ps = adc_sampler_sample_interval_ps();
+    }
+
     return to_read;
 }
 
 void adc_sampler_set_divider(uint16_t divider) {
     clock_divider = (float)divider;
-    adc_set_clkdiv(clock_divider);
+
+    if (initialized) {
+        adc_set_clkdiv(clock_divider);
+    }
 }
 
 uint8_t adc_sampler_channel_count(void) {

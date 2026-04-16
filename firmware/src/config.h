@@ -30,8 +30,8 @@
 #define OSC_DIGITAL_MASK  0x007FFFFF  /* GPIO0-22 (bit mask) */
 
 /* ---------- Clock Configuration ---------- */
-#define SYSTEM_CLOCK_HZ   150000000u
-#define ADC_CLOCK_HZ      48000000u
+#define SYSTEM_CLOCK_HZ   150000000u /* Default RP2350 system clock */
+#define ADC_CLOCK_HZ      48000000u  /* Default ADC clock */
 #define ADC_CONVERSION_CLOCKS 96u
 #define PIO_SAMPLE_LOOP_CYCLES 2u
 
@@ -48,7 +48,7 @@
 /* ---------- Sampling Buffers ---------- */
 #define ADC_BUFFER_SIZE   4096   /* Samples per ADC buffer (DMA) */
 #define PIN_BUFFER_SIZE   4096   /* GPIO snapshots per buffer */
-#define USB_TX_BUFFER_SIZE 8192  /* USB transmit buffer bytes */
+#define USB_TX_BUFFER_SIZE 8192  /* USB CDC TX FIFO bytes */
 
 /* DMA ping-pong: 2 buffers per channel */
 #define ADC_BUFFER_COUNT  2
@@ -66,6 +66,8 @@
 #define MSG_PIN_DATA      0x01  /* GPIO pin state snapshots */
 #define MSG_ADC_DATA      0x02  /* ADC sample data */
 #define MSG_TRIGGER       0x03  /* Trigger event */
+#define MSG_PIN_BATCH     0x04  /* Timestamped GPIO snapshot batch */
+#define MSG_ADC_BATCH     0x05  /* Timestamped ADC sample batch */
 #define MSG_STATUS        0x20  /* Status response */
 #define MSG_ERROR         0xFF  /* Error */
 
@@ -76,10 +78,19 @@
 #define CMD_MODE          0x13  /* Switch mode */
 #define CMD_TRIGGER       0x14  /* Configure trigger */
 
+/* Configuration item identifiers for CMD_CONFIG */
+#define CFG_HAT_PIN_DIVIDER     0x01  /* [id][float32 divider] */
+#define CFG_OSC_ADC_DIVIDER     0x10  /* [id][uint16 divider LE] */
+#define CFG_OSC_DIGITAL_ENABLE  0x11  /* [id][enable][reserved] */
+#define CFG_OSC_PIN_DIVIDER     0x12  /* [id][float32 divider] */
+
 /* Protocol limits */
-#define PROTO_MAX_PAYLOAD 4096
+#define PROTO_MAX_PAYLOAD 8192
+#define PROTO_MAX_COMMAND_PAYLOAD 256
 #define PROTO_HEADER_SIZE 4     /* SYNC + TYPE + LENGTH(2) */
 #define PROTO_CRC_SIZE    1
+#define PROTO_ADC_BATCH_OVERHEAD 20
+#define PROTO_PIN_BATCH_OVERHEAD 24
 
 /* ---------- CRC-8 MAXIM ---------- */
 #define CRC8_POLY         0x31
@@ -100,5 +111,6 @@
 /* ---------- Timing ---------- */
 #define LED_BLINK_MS      500   /* Status LED blink interval */
 #define USB_POLL_MS       1     /* USB polling interval */
+#define USB_WRITE_TIMEOUT_MS 1000
 
 #endif /* CONFIG_H */
