@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.13)
 add_executable(pico_oscilloscope
     main.c
     clock_manager.c
+    status_led.c
     usb_comm.c
     pin_monitor.c
     adc_sampler.c
@@ -10,7 +11,7 @@ add_executable(pico_oscilloscope
     osc_mode.c
 )
 
-set(PICO_OSC_TARGET_SYS_CLOCK_KHZ 300000 CACHE STRING
+set(PICO_OSC_TARGET_SYS_CLOCK_KHZ 360000 CACHE STRING
     "Requested RP2350 system clock in kHz")
 
 target_compile_definitions(pico_oscilloscope PRIVATE

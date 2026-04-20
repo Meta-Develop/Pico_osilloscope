@@ -7,35 +7,23 @@
 
 #include "config.h"
 #include "clock_manager.h"
+#include "status_led.h"
 #include "usb_comm.h"
 #include "hat_mode.h"
 #include "osc_mode.h"
 #include "pico/stdlib.h"
-#include "hardware/gpio.h"
 
 static uint8_t current_mode = MODE_HAT;
 static bool sampling_requested = false;
 
-static void led_init(void) {
-    gpio_init(GPIO_LED);
-    gpio_set_dir(GPIO_LED, GPIO_OUT);
-    gpio_put(GPIO_LED, 0);
-}
-
-static void led_set(bool on) {
-    gpio_put(GPIO_LED, on);
-}
-
 static void wait_for_usb(void) {
-    /* Blink LED while waiting for USB connection */
-    bool led_state = false;
+    status_led_set_state(STATUS_LED_WAITING_USB);
+
     while (!usb_comm_connected()) {
         usb_comm_task();
-        led_state = !led_state;
-        led_set(led_state);
-        sleep_ms(LED_BLINK_MS);
+        status_led_update();
+        sleep_ms(USB_POLL_MS);
     }
-    led_set(true);
 }
 
 static void handle_idle_commands(void) {
@@ -103,7 +91,7 @@ static void handle_idle_commands(void) {
 
 int main(void) {
     /* Initialize core peripherals */
-    led_init();
+    status_led_init();
     clock_manager_init();
     usb_comm_init();
 
@@ -116,11 +104,18 @@ int main(void) {
         usb_comm_task();
 
         if (!sampling_requested) {
-            led_set(true);
+            status_led_set_state(
+                current_mode == MODE_OSCILLOSCOPE ? STATUS_LED_IDLE_OSC : STATUS_LED_IDLE_HAT
+            );
             handle_idle_commands();
+            status_led_update();
             sleep_ms(USB_POLL_MS);
             continue;
         }
+
+        status_led_set_state(
+            current_mode == MODE_OSCILLOSCOPE ? STATUS_LED_ACTIVE_OSC : STATUS_LED_ACTIVE_HAT
+        );
 
         switch (current_mode) {
         case MODE_HAT:

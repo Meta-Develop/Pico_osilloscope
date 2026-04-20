@@ -9,6 +9,7 @@
 #include "hat_mode.h"
 #include "config.h"
 #include "pin_monitor.h"
+#include "status_led.h"
 #include "usb_comm.h"
 #include "pico/stdlib.h"
 #include <string.h>
@@ -46,6 +47,7 @@ int hat_mode_run(void) {
 
     while (true) {
         usb_comm_task();
+        status_led_update();
 
         /* Check for commands */
         if (usb_comm_receive_command(&cmd_type, cmd_buf, &cmd_len, sizeof(cmd_buf))) {
@@ -97,6 +99,7 @@ int hat_mode_run(void) {
             usb_comm_send_overflow_report("Pin",
                                           overrun_count,
                                           overrun_count * PIN_BUFFER_SIZE);
+            status_led_signal_overflow();
         }
 
     }

@@ -6,14 +6,14 @@ Simple oscilloscope and logic analyzer built on Raspberry Pi Pico 2 (RP2350).
 
 - **Hat Mode**: Stacks on a target Pico 2, monitors all GPIO pins as digital logic (27 channels)
 - **Oscilloscope Mode**: 4-channel 12-bit analog (ADC0-ADC3) + 23 digital channels
-- **High-Speed Sampling**: PIO-based digital capture tracks `clk_sys` and defaults to a 400 MHz target build clock
+- **High-Speed Sampling**: PIO-based digital capture tracks `clk_sys` and defaults to a 360 MHz target build clock
 - **Protocol Analyzer**: Offline UART, I2C, and SPI decode from digital capture CSV exports
 - **CLI Interface**: Command-line tool for capture, monitoring, and export
 - **CSV Export**: Machine-readable output for post-analysis
 - **JSON Status**: Programmatic access for automation and scripting
 
-Digital snapshots currently require 2 PIO cycles per sample, so a 400 MHz `clk_sys` build yields a
-200 MHz theoretical GPIO sample clock. Sustained streaming is still limited by USB CDC throughput, so
+Digital snapshots currently require 2 PIO cycles per sample, so a 360 MHz `clk_sys` build yields a
+180 MHz theoretical GPIO sample clock. Sustained streaming is still limited by USB CDC throughput, so
 use `--pin-divider` to reduce digital sample rate for long captures.
 
 ## Hardware
@@ -57,7 +57,7 @@ Requires: ARM GCC toolchain, CMake 3.13+, [Pico SDK 2.x](https://github.com/rasp
 
 ```bash
 cd firmware
-cmake -B build -G Ninja -DPICO_OSC_TARGET_SYS_CLOCK_KHZ=400000
+cmake -B build -G Ninja -DPICO_OSC_TARGET_SYS_CLOCK_KHZ=360000
 cmake --build build
 build/_deps/picotool-build/picotool uf2 convert \
     build/src/pico_oscilloscope.bin build/src/pico_oscilloscope.uf2 \
